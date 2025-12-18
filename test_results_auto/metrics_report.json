@@ -1,0 +1,21 @@
+{
+  "accuracy": 0.0,
+  "total_samples": 4,
+  "per_class": {
+    "Infiltration": {
+      "samples": 2,
+      "correct": 0,
+      "accuracy": 0.0
+    },
+    "Pneumonia": {
+      "samples": 1,
+      "correct": 0,
+      "accuracy": 0.0
+    },
+    "Atelectasis": {
+      "samples": 1,
+      "correct": 0,
+      "accuracy": 0.0
+    }
+  }
+}

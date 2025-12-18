@@ -91,15 +91,28 @@ class MedicalAIModel:
         self.models = {}
         
         # Define classes for each modality
+        # UPGRADED: All 18 pathologies (more diseases = more revenue potential!)
         self.classes = {
             'xray': [
-                'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
-                'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax', 'Normal'
+                'Atelectasis', 'Consolidation', 'Infiltration', 'Pneumothorax',
+                'Edema', 'Emphysema', 'Fibrosis', 'Effusion', 'Pneumonia',
+                'Pleural_Thickening', 'Cardiomegaly', 'Nodule', 'Mass', 'Hernia',
+                'Lung Lesion', 'Fracture', 'Lung Opacity', 'Enlarged Cardiomediastinum'
             ]
         }
         
         # NEW TRANSFORM: Preserves Aspect Ratio to prevent "Squashed Heart" error
-        self.transform = transforms.Compose([
+        # X-Ray specific transform (Grayscale)
+        self.transform_xray = transforms.Compose([
+            transforms.Grayscale(num_output_channels=1),  # Convert to 1 channel
+            transforms.Resize(256),        # Resize shortest side to 256
+            transforms.CenterCrop(224),    # Crop center 224x224
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5])  # Single channel normalization
+        ])
+        
+        # General transform for RGB models (MRI, Skin)
+        self.transform_rgb = transforms.Compose([
             transforms.Resize(256),        # Resize shortest side to 256
             transforms.CenterCrop(224),    # Crop center 224x224
             transforms.ToTensor(),
@@ -146,90 +159,129 @@ class MedicalAIModel:
             
         return True, ""
 
-    def generate_heatmap(self, model, image_tensor, original_image):
-        """Generate Grad-CAM Heatmap (Uses first model in ensemble if list)"""
+    def generate_heatmap(self, model, image_tensor, original_image, target_category=None):
+        """
+        Generate Grad-CAM Heatmap - IMPROVED VERSION
+        Shows which regions the model focuses on for diagnosis
+        """
         try:
             # Handle Ensemble: Use the first model for Grad-CAM
             target_model = model[0] if isinstance(model, list) else model
             
-            # Target the last block of the model (ConvNeXt specific, need adjust for others)
-            # For EfficientNet: conv_head or blocks[-1]
-            # For DenseNet: features.denseblock4
-            
+            # Select appropriate target layer based on model architecture
             target_layers = None
-            if 'efficientnet' in str(type(target_model)).lower():
-                 target_layers = [target_model.conv_head]
-            elif 'densenet' in str(type(target_model)).lower():
-                 # For TorchXRayVision DenseNet
-                 target_layers = [target_model.features.denseblock4.denselayer16] 
+            model_type = str(type(target_model)).lower()
+            
+            if 'efficientnet' in model_type:
+                # For EfficientNet: Use the last convolutional layer before classifier
+                target_layers = [target_model.conv_head]
+            elif 'densenet' in model_type:
+                # For TorchXRayVision DenseNet: Use last dense block
+                # This captures high-level features while maintaining spatial resolution
+                target_layers = [target_model.features.denseblock4]
+            elif 'resnet' in model_type:
+                # For ResNet: Use last residual block
+                target_layers = [target_model.layer4[-1]]
             else:
-                 # Fallback for ConvNeXt
-                 target_layers = [target_model.stages[-1].blocks[-1]]
+                # Fallback: Try to find the last convolutional layer
+                print(f"⚠ Unknown model type, using default layer")
+                target_layers = [list(target_model.modules())[-2]]
 
             if not target_layers:
-                 return None
+                print("❌ Could not find target layer for Grad-CAM")
+                return None
 
+            # Create Grad-CAM object
             cam = GradCAM(model=target_model, target_layers=target_layers)
             
-            # Generate CAM
-            grayscale_cam = cam(input_tensor=image_tensor)
-            grayscale_cam = grayscale_cam[0, :]
+            # Generate CAM for the predicted class (or all classes if multi-label)
+            # Use only the first image from TTA (Test-Time Augmentation)
+            single_tensor = image_tensor[0:1]  # Take first image from batch
             
-            # Prepare original image for overlay (Must match the Crop!)
-            # 1. Resize shortest side to 256
+            # For multi-label models (like torchxrayvision), use target_category
+            grayscale_cam = cam(input_tensor=single_tensor, targets=target_category)
+            grayscale_cam = grayscale_cam[0, :]  # Extract first (and only) heatmap
+            
+            # Prepare original image - MUST match preprocessing exactly
+            # Convert to RGB if grayscale
+            if original_image.mode != 'RGB':
+                original_image = original_image.convert('RGB')
+            
+            # Apply same transforms as model input (but without normalization for visualization)
             w, h = original_image.size
+            
+            # 1. Resize shortest side to 256 (matches transform_xray/transform_rgb)
             if w < h:
                 new_w = 256
                 new_h = int(h * (256 / w))
             else:
                 new_h = 256
                 new_w = int(w * (256 / h))
-                
+            
             img_resized = original_image.resize((new_w, new_h), Image.BICUBIC)
             
-            # 2. Center Crop 224
-            left = (new_w - 224) / 2
-            top = (new_h - 224) / 2
-            right = (new_w + 224) / 2
-            bottom = (new_h + 224) / 2
+            # 2. Center Crop to 224x224 (matches model input)
+            left = int((new_w - 224) / 2)
+            top = int((new_h - 224) / 2)
+            right = int((new_w + 224) / 2)
+            bottom = int((new_h + 224) / 2)
             img_cropped = img_resized.crop((left, top, right, bottom))
             
+            # Convert to numpy and normalize for visualization
             img_np = np.array(img_cropped)
             rgb_img = np.float32(img_np) / 255.0
             
-            # Create overlay
+            # Create overlay - red regions show where model is looking
             visualization = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
             
-            # Convert to Base64
+            # Convert to Base64 for web transmission
             is_success, buffer = cv2.imencode(".jpg", cv2.cvtColor(visualization, cv2.COLOR_RGB2BGR))
             if is_success:
                 return base64.b64encode(buffer).decode('utf-8')
+            else:
+                print("❌ Failed to encode heatmap image")
+                return None
+                
         except Exception as e:
-            print(f"Grad-CAM failed: {e}")
+            print(f"❌ Grad-CAM failed: {e}")
+            import traceback
+            traceback.print_exc()
         return None
 
     def load_models(self):
         print("🔄 Loading Medical AI Models...")
         
-        # 1. X-Ray (DenseNet SOTA)
+        # 1. X-Ray (DenseNet SOTA) - NOW WITH ALL 18 PATHOLOGIES!
         try:
-            print("   Loading X-Ray Model (DenseNet121-All)...")
-            # Re-create the exact architecture used in training
+            print("   Loading X-Ray Model (DenseNet121-All - 18 Pathologies)...")
+            # Load pretrained torchxrayvision model (trained on 800K+ images)
+            # This model can detect ALL 18 pathologies out of the box!
             model = xrv.models.DenseNet(weights="densenet121-res224-all")
-            num_ftrs = model.classifier.in_features
-            model.classifier = nn.Linear(num_ftrs, 9) # 9 Classes
             
+            # Check if we have custom trained 18-class weights (future upgrade)
             path = MODEL_PATHS['xray']
             if os.path.exists(path):
-                state_dict = torch.load(path, map_location=self.device)
-                model.load_state_dict(state_dict)
-                print("   ✅ X-Ray Model Loaded!")
+                try:
+                    # Try loading custom weights (18 classes - matching pretrained)
+                    state_dict = torch.load(path, map_location=self.device)
+                    # Only load if it's 18-class compatible
+                    if state_dict['classifier.weight'].shape[0] == 18:
+                        model.load_state_dict(state_dict)
+                        print("   ✅ X-Ray Model Loaded (Custom 18-class fine-tuned)!")
+                    else:
+                        print(f"   ⚠ Custom weights have {state_dict['classifier.weight'].shape[0]} classes (need 18)")
+                        print("   ✅ Using pretrained model (18 pathologies)")
+                except Exception as load_error:
+                    print(f"   ⚠ Failed to load custom weights: {load_error}")
+                    print("   ✅ Using pretrained model (18 pathologies)")
             else:
-                print(f"   ⚠ Weights not found at {path}")
+                print(f"   ⚠ Custom weights not found at {path}")
+                print("   ✅ Using pretrained torchxrayvision model (18 pathologies)")
             
             model.to(self.device)
             model.eval()
             self.models['xray'] = model
+            print(f"   📊 Detectable Diseases: {len(self.classes['xray'])}")
         except Exception as e:
             print(f"   ❌ Failed to load X-Ray: {e}")
 
@@ -265,9 +317,18 @@ class MedicalAIModel:
             # 1.5. ARTIFACT REMOVAL (CLAHE)
             image = self.preprocess_medical(image)
 
+            # 2. SELECT MODEL (Default to X-Ray for now, can be dynamic later)
+            target_modality = 'xray'
+            
+            # Select appropriate transform based on modality
+            if target_modality == 'xray':
+                transform = self.transform_xray
+            else:
+                transform = self.transform_rgb
+            
             # Preprocess with Test-Time Augmentation (TTA)
             # 1. Original
-            t_orig = self.transform(image)
+            t_orig = transform(image)
             
             # 2. Horizontal Flip
             t_flip = torch.flip(t_orig, [2])
@@ -278,13 +339,10 @@ class MedicalAIModel:
             left = (w - crop_size)/2
             top = (h - crop_size)/2
             img_zoom = image.crop((left, top, left+crop_size, top+crop_size))
-            t_zoom = self.transform(img_zoom)
+            t_zoom = transform(img_zoom)
             
             # Stack batch: [3, C, H, W]
-            image_tensor = torch.stack([t_orig, t_flip, t_zoom]).to(self.device)
-            
-            # 2. SELECT MODEL (Default to X-Ray for now, can be dynamic later)
-            target_modality = 'xray' 
+            image_tensor = torch.stack([t_orig, t_flip, t_zoom]).to(self.device) 
             model_obj = self.models.get(target_modality)
             
             if not model_obj:
@@ -293,32 +351,36 @@ class MedicalAIModel:
             # PREDICTION
             probabilities = None
             
+            # Get class information first
+            class_list = self.classes[target_modality]
+            num_classes = len(class_list)
+            
             with torch.no_grad():
                 # TTA: Average across batch (dim=0)
-                out = model_obj(image_tensor) # [3, 9]
-                probs = torch.softmax(out, dim=1)
-                probabilities = probs.mean(dim=0)
+                out = model_obj(image_tensor)  # [3, num_classes]
+                
+                # Use sigmoid activation for multi-label classification (18 diseases)
+                # A patient can have multiple diseases simultaneously
+                probabilities = torch.sigmoid(out).mean(dim=0)  # Average TTA predictions
 
                 confidence, predicted_idx = torch.max(probabilities, 0)
             
-            class_list = self.classes[target_modality]
-            
-            # --- SAFETY NET PROTOCOL ---
-            normal_idx = 8 # Assuming Normal is last
-            normal_prob = probabilities[normal_idx].item()
-            
-            # Critical Indices: 1=Cardio, 4=Mass, 5=Nodule, 6=Pneumonia, 7=Pneumothorax
-            critical_indices = [1, 4, 5, 6, 7] 
+            # --- SAFETY NET PROTOCOL (18 pathologies - all are diseases) ---
+            # Torchxrayvision has NO "Normal" class - all outputs are pathologies
+            # Flag critical life-threatening conditions with lower threshold
+            critical_indices = [3, 4, 8, 12]  # Pneumothorax, Edema, Pneumonia, Mass
+            normal_prob = 0.0  # No normal class in 18-pathology model
             
             override_disease = None
             override_conf = 0.0
             
             for idx in critical_indices:
-                prob = probabilities[idx].item()
-                if prob > 0.15 and normal_prob < 0.90:
-                    if prob > override_conf:
-                        override_conf = prob
-                        override_disease = idx
+                if idx < num_classes:
+                    prob = probabilities[idx].item()
+                    if prob > 0.15 and normal_prob < 0.90:
+                        if prob > override_conf:
+                            override_conf = prob
+                            override_disease = idx
 
             if override_disease is not None:
                 predicted_idx = torch.tensor(override_disease)

@@ -13,6 +13,7 @@ from sklearn.metrics import roc_auc_score
 
 # --- SOTA CONFIGURATION (CheXpert Style) ---
 # Based on: "CheXpert: A Large Chest Radiograph Dataset..." (Irvin et al., 2019)
+# UPGRADED: Now training on all 18 pathologies (same as torchxrayvision pretrained model)
 CONFIG = {
     'img_size': 224,
     'batch_size': 16, # Small batch size for better generalization
@@ -20,7 +21,13 @@ CONFIG = {
     'lr': 1e-4,
     'weight_decay': 1e-5,
     'model_name': 'densenet121-res224-all', # Starting point
-    'target_classes': ['Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration', 'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax', 'Normal']
+    # All 18 pathologies from torchxrayvision (more diseases = more clinical value!)
+    'target_classes': [
+        'Atelectasis', 'Consolidation', 'Infiltration', 'Pneumothorax',
+        'Edema', 'Emphysema', 'Fibrosis', 'Effusion', 'Pneumonia',
+        'Pleural_Thickening', 'Cardiomegaly', 'Nodule', 'Mass', 'Hernia',
+        'Lung Lesion', 'Fracture', 'Lung Opacity', 'Enlarged Cardiomediastinum'
+    ]
 }
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
