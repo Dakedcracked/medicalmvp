@@ -1,0 +1,11 @@
+# Virtual Environments
+medical_env/
+
+# Data and Weights (Large files)
+Calibration_Dataset/
+medical_ai.db
+
+# System/IDE files
+.DS_Store
+__pycache__/
+*.pyc

@@ -1,0 +1,16 @@
+flask
+flask-cors
+torch
+torchvision
+torchaudio
+timm
+albumentations
+medmnist
+numpy
+pillow
+opencv-python-headless
+grad-cam
+bcrypt
+pyjwt
+requests
+torchxrayvision
